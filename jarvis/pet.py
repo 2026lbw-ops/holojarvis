@@ -64,17 +64,16 @@ import tkinter as tk  # noqa: E402
 from PIL import Image, ImageDraw, ImageFont, ImageTk  # noqa: E402
 
 # ---- 面板尺寸（逻辑像素）+ 超采样倍率 -------------------------------
-W, H = 720, 600
+W, H = 1206, 694
 S = 2                           # 内部 2x 渲染再缩小，边缘更顺滑
 ROOT = Path(__file__).resolve().parent.parent
 
-# 左右分栏
-DIV_X = 314                     # 竖直分隔线
-LX = 26                         # 左栏左边界
-RX = 336                        # 右栏左边界
-RXE = W - 24                    # 右栏右边界
-CXL, CYL = 168, 256             # 弧反应堆中心（左栏）
-REACTOR_R = 76
+# 参考图宽屏布局
+LX = 72                         # 左侧主 HUD 边界
+RX = 900                        # 右侧 notes / reader 区
+RXE = W - 74                    # 右侧 HUD 边界
+CXL, CYL = 620, 320             # 中央弧反应堆中心
+REACTOR_R = 84
 
 # 深青电影色调
 TEAL = (40, 188, 205)           # 主色
@@ -86,13 +85,48 @@ INK = (4, 9, 11)                # 面板底色
 STATE_COLOR = {
     "idle": (40, 190, 208),
     "listening": (52, 220, 158),
-    "thinking": (236, 182, 92),
+    "thinking": (46, 225, 222),
     "speaking": (118, 236, 248),
 }
 STATE_LABEL = {
     "idle": "STANDBY", "listening": "LISTENING",
     "thinking": "PROCESSING", "speaking": "SPEAKING",
 }
+
+AVATAR_CX, AVATAR_CY = 948, 346
+
+
+def _motion_boost(state: str) -> float:
+    return {
+        "idle": 1.0,
+        "listening": 1.8,
+        "thinking": 2.7,
+        "speaking": 2.2,
+    }.get(state, 1.0)
+
+
+def _runtime_orbit_angles(phase: float, state: str) -> tuple[float, float, float]:
+    """Angles for the always-on HUD orbit rings.
+
+    The rings never stop, but active states make the motion visibly more alive.
+    """
+    boost = _motion_boost(state)
+    return (
+        phase * 12.0 * boost,
+        115.0 - phase * 7.0 * boost,
+        248.0 + phase * 4.4 * boost,
+    )
+
+
+def _avatar_eye_alpha(state: str, phase: float) -> int:
+    if state == "thinking":
+        wave = 0.5 + 0.5 * math.sin(phase * 2.0 - math.pi / 2)
+        return int(86 + wave * 152)
+    if state == "speaking":
+        return 118
+    if state == "listening":
+        return 92
+    return 38
 
 _FONT_CACHE: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
 _WINDIR = os.environ.get("WINDIR", r"C:\Windows")
@@ -305,7 +339,7 @@ class DesktopPet:
 
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
-        self._x, self._y = sw - W - 32, max(36, (sh - H) // 2)
+        self._x, self._y = max(12, sw - W - 32), max(18, (sh - H) // 2)
         self.root.geometry(f"{W}x{H}+{self._x}+{self._y}")
 
         try:
@@ -388,6 +422,16 @@ class DesktopPet:
         d.line([x0 * S, y0 * S, x1 * S, y1 * S], fill=fill,
                width=max(1, int(width * S)))
 
+    def _rect(self, d, x0, y0, x1, y1, **kw) -> None:
+        d.rectangle([x0 * S, y0 * S, x1 * S, y1 * S], **kw)
+
+    def _poly(self, d, pts, fill, outline=None, width=1) -> None:
+        scaled = [(x * S, y * S) for x, y in pts]
+        d.polygon(scaled, fill=fill)
+        if outline is not None:
+            d.line(scaled + [scaled[0]], fill=outline,
+                   width=max(1, int(width * S)))
+
     def _txt(self, d, x, y, text, font, fill, anchor="la") -> None:
         d.text((x * S, y * S), text, font=font, fill=fill, anchor=anchor)
 
@@ -423,6 +467,8 @@ class DesktopPet:
         color = STATE_COLOR.get(self._state, STATE_COLOR["idle"])
 
         self._draw_sweep(d)
+        self._draw_avatar(d, color)
+        self._draw_static_hud(d, color)
         self._draw_header(d)
         self._draw_reactor(d, color)
         self._draw_waveform(d, color)
@@ -435,57 +481,105 @@ class DesktopPet:
     def _build_bg(self) -> Image.Image:
         big = Image.new("RGBA", (W * S, H * S), (0, 0, 0, 0))
         d = ImageDraw.Draw(big)
-        m = 6
-        d.rounded_rectangle([m * S, m * S, (W - m) * S, (H - m) * S],
-                            radius=18 * S, fill=(3, 7, 9, 247))
+        self._rect(d, 0, 0, W, H, fill=(0, 0, 0, 255))
 
-        ix0, iy0, ix1, iy1 = m + 4, m + 4, W - m - 4, H - m - 4
-        # 网格（极淡，仅做底纹）
-        gx = ix0
-        while gx < ix1:
-            self._line(d, gx, iy0, gx, iy1, 1, (*GRID, 8))
-            gx += 40
-        gy = iy0
-        while gy < iy1:
-            self._line(d, ix0, gy, ix1, gy, 1, (*GRID, 8))
-            gy += 40
-        # CRT 扫描线（极淡，不压字）
-        sy = iy0
-        while sy < iy1:
-            self._line(d, ix0, sy, ix1, sy, 1, (0, 12, 14, 8))
-            sy += 4
+        # 极暗绿的右侧光晕，贴近参考图里面甲背后的荧光底色。
+        for i in range(42, 0, -1):
+            frac = i / 42
+            alpha = int(2 * (1 - frac) ** 2)
+            d.ellipse([(770 - i * 3) * S, (24 - i * 2) * S,
+                       (1200 + i * 2) * S, (706 + i * 2) * S],
+                      fill=(10, 54, 24, alpha))
 
-        # 文字区凹陷底板：盖掉底纹、衬高对比，让字更清晰
-        for x0, y0, x1, y1 in (
-            (RX - 12, 112, RXE + 10, 466),     # 右栏 SYSTEM + NOTES
-            (24, 470, W - 24, H - 32),          # 底部转写台账
+        # 左侧竖栏与小三角标。
+        self._line(d, 72, 64, 72, 666, 4, (*TEAL, 230))
+        self._line(d, 84, 64, 292, 64, 2, (*TEAL, 220))
+        self._line(d, 84, 64, 84, 210, 2, (*TEAL_DIM, 180))
+        self._line(d, 58, 488, 302, 488, 2, (*TEAL, 205))
+        for y in (78, 100, 122):
+            self._poly(d, [(70, y), (76, y + 6), (70, y + 12)],
+                       fill=(*TEAL, 230))
+
+        # 中央线路分支，围绕反应堆挂载应用/媒体项目。
+        for y, label in (
+            (210, "Images"), (232, "Documents"), (286, "Videos"),
+            (326, "Music"), (369, "Skinspath"),
         ):
-            d.rounded_rectangle([x0 * S, y0 * S, x1 * S, y1 * S],
-                                radius=9 * S, fill=(0, 4, 6, 165))
+            self._line(d, 448, y, 516, y, 2, (*TEAL, 215))
+            self._ell(d, 448, y, 7, fill=(*TEAL, 210))
+            self._txt(d, 486, y - 13, label, _mono(10), (*TEAL, 230))
+        self._line(d, 718, CYL, 806, CYL, 2, (*TEAL, 190))
+        self._line(d, 806, CYL, 806, 292, 2, (*TEAL, 190))
+        for i, label in enumerate(
+            ("gmail", "wikipedia", "duckmeter", "baconit", "lifehacker",
+             "io9", "gizmodo", "kotaku", "twitter", "facebook", "youtube")
+        ):
+            y = 286 + i * 20
+            self._line(d, 742, y, 806, y, 1.5, (*TEAL_DIM, 190))
+            self._ell(d, 808, y, 5, fill=(*TEAL, 225))
+            self._txt(d, 742, y - 8, label, _mono(9), (*TEAL, 215))
 
-        # 面板描边 + 四角 L 装饰
-        d.rounded_rectangle([m * S, m * S, (W - m) * S, (H - m) * S],
-                            radius=18 * S, outline=(*TEAL_DIM, 210),
-                            width=max(1, int(1.5 * S)))
-        c = 24
-        for cx, cy, sx, sy2 in ((m + 14, m + 14, 1, 1), (W - m - 14, m + 14, -1, 1),
-                                (m + 14, H - m - 14, 1, -1),
-                                (W - m - 14, H - m - 14, -1, -1)):
-            self._line(d, cx, cy, cx + sx * c, cy, 2, (*TEAL, 235))
-            self._line(d, cx, cy, cx, cy + sy2 * c, 2, (*TEAL, 235))
+        # 右上 Notes 框与 Reader 区主线。
+        self._txt(d, 902, 70, "Notes", _mono(11), (*TEAL, 235))
+        self._line(d, 900, 80, 1060, 80, 2, (*TEAL, 225))
+        self._line(d, 900, 80, 900, 310, 2, (*TEAL, 225))
+        self._line(d, 1060, 80, 1060, 310, 2, (*TEAL, 225))
+        self._line(d, 900, 310, 1060, 310, 2, (*TEAL, 225))
+        self._line(d, 900, 80, 876, 80, 1, (*TEAL, 180))
+        self._line(d, 948, 388, 1124, 388, 2, (*TEAL_DIM, 190))
+        self._txt(d, 1024, 374, "Reader", _mono(10), (*TEAL, 230))
+        self._txt(d, 1040, 407, "gizmodo", _mono(12), (*TEAL, 240))
 
-        # 分隔线
-        self._line(d, 24, 104, W - 24, 104, 1, (*TEAL_DIM, 170))
-        self._line(d, DIV_X, 116, DIV_X, 470, 1, (*TEAL_DIM, 150))
-
-        # 静态区块标题 + 页脚
-        self._txt(d, RX, 118, "▮ SYSTEM", _mono(11), (*TEAL, 235))
-        self._txt(d, RX, 286, "▮ NOTES", _mono(11), (*TEAL, 235))
-        self._txt(d, LX + 2, 384, "▮ AUDIO", _mono(10), (*TEAL_DIM, 230))
-        self._txt(d, W // 2, H - 20,
-                  "J A R V I S   D I S P L A Y   S Y S T E M",
-                  _mono(10), (*TEAL_DIM, 235), anchor="ma")
+        # 底部 JARVIS Display System 微缩清单。
+        self._txt(d, 604, 548, "JARVIS DISPLAY SYSTEM", _mono(9), (*TEAL, 210))
+        x = 604
+        for title, rows in (
+            ("LEFT PANEL:", ("TIME", "DATE", "PRIMARY DRIVE", "POWER STATUS", "WASTE STATUS")),
+            ("WEATHER BAR:", ("TEMPERATURE", "CLIMATE", "VISUALS", "NOTES")),
+            ("CENTRAL INTERFACE:", ("FOLDER LINK", "WEB CONNECTS", "PRIMARY APPS", "RSS FEEDS")),
+        ):
+            self._txt(d, x, 568, title, _mono(8), (*TEAL, 220))
+            for j, row in enumerate(rows):
+                self._txt(d, x, 584 + j * 12, f"· {row}", _mono(7), (*TEAL_DIM, 210))
+            x += 148
         return big
+
+    def _draw_static_hud(self, d, color) -> None:
+        """State-colored scan overlays that should sit above the face but below text."""
+        rr, gg, bb = color
+        ph = self._phase
+        for idx, ang in enumerate(_runtime_orbit_angles(ph + 1.1, self._state)):
+            self._arc(d, 332, 606, 55 + idx * 7, ang, ang + 108,
+                      7 if idx == 0 else 2, (rr, gg, bb, 125 - idx * 25))
+        self._ell(d, 558, 486, 12, outline=(rr, gg, bb, 210),
+                  width=max(1, int(2 * S)))
+        self._line(d, 558, 426, 558, 474, 2, (rr, gg, bb, 190))
+        self._line(d, 558, 498, 558, 528, 2, (rr, gg, bb, 190))
+
+        for i, label in enumerate(
+            ("gmail", "wikipedia", "duckmeter", "baconit", "lifehacker",
+             "io9", "gizmodo", "kotaku", "twitter", "facebook", "youtube")
+        ):
+            y = 286 + i * 20
+            self._line(d, 742, y, 806, y, 1.5, (*TEAL_DIM, 210))
+            self._ell(d, 808, y, 5, fill=(*TEAL, 235))
+            self._txt(d, 742, y - 8, label, _mono(9), (*TEAL, 235))
+
+        # 右侧浮层线框必须压在面甲上方。
+        self._txt(d, 902, 70, "Notes", _mono(11), (*TEAL, 245))
+        self._line(d, 900, 80, 1060, 80, 2, (*TEAL, 235))
+        self._line(d, 900, 80, 900, 310, 2, (*TEAL, 235))
+        self._line(d, 1060, 80, 1060, 310, 2, (*TEAL, 235))
+        self._line(d, 900, 310, 1060, 310, 2, (*TEAL, 235))
+        for y in (210, 232, 254, 276):
+            self._rect(d, 898, y, 908, y + 14, fill=(*TEAL, 190))
+        self._txt(d, 1038, 292, "+", _mono(30), (*TEAL, 240), anchor="ma")
+        self._line(d, 948, 388, 1124, 388, 2, (*TEAL_DIM, 220))
+        self._line(d, 1040, 398, 1130, 398, 2, (*TEAL, 220))
+        self._txt(d, 1024, 374, "Reader", _mono(10), (*TEAL, 235))
+        self._txt(d, 1040, 407, "gizmodo", _mono(12), (*TEAL, 245))
+        for x in (965, 1004, 1044, 1084):
+            self._rect(d, x, 610, x + 12, 622, fill=(*TEAL, 210))
 
     def _draw_sweep(self, d) -> None:
         """缓慢向下扫掠的高光线，增强 CRT 全息感。"""
@@ -497,23 +591,43 @@ class DesktopPet:
     # ---- 顶栏 --------------------------------------------------------
     def _draw_header(self, d) -> None:
         now = time.localtime()
-        clock = time.strftime("%H:%M", now)
-        months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL",
-                  "AUG", "SEP", "OCT", "NOV", "DEC"]
-        days = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
-        date_str = f"{months[now.tm_mon - 1]} {now.tm_mday:02d}   {days[now.tm_wday]}"
+        cx, cy, r = 174, 150, 74
+        ph = self._phase
+        self._ell(d, cx, cy, r, outline=(*TEAL, 230), width=max(1, int(3 * S)))
+        self._ell(d, cx, cy, r - 10, outline=(*TEAL, 180), width=max(1, int(2 * S)))
+        self._arc(d, cx, cy, r - 2, -8 + ph * 18, 84 + ph * 18,
+                  12, (*TEAL, 235))
+        self._arc(d, cx, cy, r + 8, 112 - ph * 8, 316 - ph * 8,
+                  2, (*TEAL, 180))
+        month = time.strftime("%B", now).lower()
+        self._txt(d, cx, cy - 40, month, _han(18), (*TEAL, 235), anchor="ma")
+        self._txt(d, cx, cy + 2, f"{now.tm_mday:02d}", _mono(45),
+                  (*TEAL_HI, 255), anchor="ma")
+        self._arc(d, cx, cy + 7, 30, 12, 168, 2, (*TEAL, 220))
+        self._txt(d, 225, 84, time.strftime("%H:%M", now), _mono(12),
+                  (*TEAL_HI, 255))
+        self._txt(d, 272, 84, time.strftime("%S", now), _mono(7),
+                  (*TEAL, 235))
+        self._txt(d, 224, 106, time.strftime("%A", now).lower(), _mono(12),
+                  (*TEAL, 235))
 
-        self._txt(d, 28, 24, clock, _mono(46), (*TEAL_HI, 255))
-        tw = d.textlength(clock, font=_mono(46)) / S
-        self._txt(d, 28 + tw + 8, 52, time.strftime("%S", now), _mono(16),
-                  (*TEAL, 255))
-        self._txt(d, 30, 82, date_str, _mono(13), (205, 240, 248, 255))
-
-        temp = self._weather.temp or "--°"
-        cond = self._weather.text or "SYS ONLINE"
-        self._txt(d, RXE, 26, temp, _mono(32), (*TEAL_HI, 255), anchor="ra")
-        self._txt(d, RXE, 62, cond[:18], _mono(12), (195, 232, 242, 245),
-                  anchor="ra")
+        temp = (self._weather.temp or "--°").replace("+", "")
+        cond = (self._weather.text or "Atmospheric\nAnalysis").title()
+        wx, wy, wr = 462, 132, 58
+        self._txt(d, 360, 70, "Fog", _mono(10), (*TEAL, 235))
+        self._line(d, 340, 80, 424, 80, 2, (*TEAL, 205))
+        self._line(d, 424, 80, 444, 100, 2, (*TEAL, 205))
+        self._ell(d, wx, wy, wr, outline=(*TEAL, 225), width=max(1, int(5 * S)))
+        self._ell(d, wx, wy, wr - 13, outline=(*TEAL_DIM, 200),
+                  width=max(1, int(4 * S)))
+        self._arc(d, wx, wy, wr + 7, -72 - ph * 14, 160 - ph * 14,
+                  2, (*TEAL, 200))
+        self._txt(d, wx, wy + 8, temp[:3], _mono(36), (*TEAL_HI, 255),
+                  anchor="ma")
+        self._txt(d, 342, 108, "Atmospheric", _mono(9), (*TEAL_DIM, 210))
+        self._txt(d, 342, 126, "Analysis", _mono(9), (*TEAL_DIM, 210))
+        self._txt(d, wx, wy + wr + 16, cond[:18], _mono(8), (*TEAL_DIM, 190),
+                  anchor="ma")
 
     # ---- 弧反应堆 ----------------------------------------------------
     def _draw_reactor(self, d, color) -> None:
@@ -528,6 +642,8 @@ class DesktopPet:
             pulse = 1.0 + 0.03 * math.sin(ph * 0.9)
         R = REACTOR_R * pulse
         cx, cy = CXL, CYL
+
+        self._draw_runtime_orbits(d, cx, cy, R, color)
 
         for i in range(16, 0, -1):
             frac = i / 16
@@ -569,15 +685,122 @@ class DesktopPet:
         self._txt(d, cx, cy + R * 1.34, STATE_LABEL.get(self._state, "STANDBY"),
                   _mono(12), (rr, gg, bb, 255), anchor="ma")
 
+    def _draw_runtime_orbits(self, d, cx, cy, r, color) -> None:
+        rr, gg, bb = color
+        boost = _motion_boost(self._state)
+        active = min(1.0, (boost - 1.0) / 1.7)
+        for idx, ang in enumerate(_runtime_orbit_angles(self._phase, self._state)):
+            ring_r = r * (1.36 + idx * 0.16)
+            alpha = int(68 + active * 72 - idx * 13)
+            width = 1.2 + idx * 0.35
+            self._arc(d, cx, cy, ring_r, ang, ang + 76 - idx * 8,
+                      width, (rr, gg, bb, alpha))
+            self._arc(d, cx, cy, ring_r, ang + 170, ang + 224 + idx * 9,
+                      width, (rr, gg, bb, max(34, alpha - 24)))
+
+            dot_a = math.radians(ang + 76 - idx * 16)
+            dot_x = cx + math.cos(dot_a) * ring_r
+            dot_y = cy + math.sin(dot_a) * ring_r
+            dot_r = 2.1 + idx * 0.45 + active * 0.9
+            self._ell(d, dot_x, dot_y, dot_r * 3.1,
+                      fill=(rr, gg, bb, int(24 + active * 24)))
+            self._ell(d, dot_x, dot_y, dot_r, fill=(rr, gg, bb, 235))
+
+    # ---- 右侧头像 ----------------------------------------------------
+    def _draw_avatar(self, d, color) -> None:
+        rr, gg, bb = color
+        cx, cy = AVATAR_CX, AVATAR_CY
+        eye_alpha = _avatar_eye_alpha(self._state, self._phase)
+        boost = _motion_boost(self._state)
+
+        # 参考图里的面甲是右半屏的主体：暗绿金属面 + 青色眼缝。
+        for idx, ang in enumerate(_runtime_orbit_angles(self._phase + 0.6, self._state)):
+            ring_r = 150 + idx * 42
+            alpha = int(18 + min(boost, 2.7) * 7 - idx * 4)
+            self._arc(d, cx, cy, ring_r, ang + idx * 26, ang + 72 + idx * 18,
+                      1.0, (*TEAL, alpha))
+            self._arc(d, cx, cy, ring_r, ang + 184, ang + 232,
+                      1.0, (*TEAL_DIM, max(14, alpha - 8)))
+
+        helmet_outer = [
+            (812, 52), (916, 38), (1036, 44), (1140, 118), (1188, 304),
+            (1164, 516), (1080, 666), (930, 690), (794, 586), (740, 392),
+            (756, 192),
+        ]
+        self._poly(d, helmet_outer, fill=(14, 57, 32, 92),
+                   outline=(52, 160, 78, 78), width=1.3)
+
+        forehead = [
+            (858, 62), (956, 56), (1048, 82), (1010, 220), (914, 198),
+            (832, 222), (792, 164),
+        ]
+        brow = [
+            (796, 242), (914, 252), (960, 300), (864, 322), (766, 292),
+        ]
+        cheek = [
+            (808, 340), (926, 332), (1052, 360), (1110, 456), (1054, 584),
+            (924, 636), (824, 552), (772, 420),
+        ]
+        jaw = [
+            (924, 402), (1028, 392), (1088, 494), (1022, 628), (932, 656),
+            (874, 586), (858, 454),
+        ]
+        for pts, fill, outline in (
+            (forehead, (42, 116, 48, 76), (70, 168, 78, 58)),
+            (brow, (18, 76, 50, 92), (52, 144, 74, 62)),
+            (cheek, (16, 86, 55, 84), (44, 154, 78, 62)),
+            (jaw, (10, 54, 48, 90), (38, 128, 86, 62)),
+        ):
+            self._poly(d, pts, fill=fill, outline=outline, width=1.0)
+
+        self._line(d, 924, 386, 924, 646, 1, (74, 178, 112, 72))
+        self._line(d, 790, 426, 874, 586, 1, (42, 154, 94, 64))
+        self._line(d, 1084, 182, 1160, 308, 1, (70, 160, 80, 52))
+        self._line(d, 1116, 514, 1032, 628, 1, (52, 150, 90, 68))
+
+        eye_fill_alpha = eye_alpha
+        if self._state == "thinking":
+            eye_level = max(0.0, min(1.0, (eye_alpha - 86) / 152))
+            eye_color = tuple(
+                int(TEAL_DIM[i] + (TEAL_HI[i] - TEAL_DIM[i]) * eye_level)
+                for i in range(3)
+            )
+            eye_fill_alpha = int(112 + eye_level * 143)
+        else:
+            eye_color = tuple(int(c * 0.78) for c in (rr, gg, bb))
+        left_eye = [
+            (782, 374), (906, 338), (924, 354), (802, 396),
+        ]
+        right_eye = [
+            (936, 340), (1042, 310), (1068, 324), (960, 364),
+        ]
+        glow = max(30, int(eye_alpha * 0.42))
+        for pts in (left_eye, right_eye):
+            mx0 = (pts[0][0] + pts[3][0]) / 2
+            my0 = (pts[0][1] + pts[3][1]) / 2
+            mx1 = (pts[1][0] + pts[2][0]) / 2
+            my1 = (pts[1][1] + pts[2][1]) / 2
+            self._line(d, mx0, my0, mx1, my1, 12, (*eye_color, int(glow * 0.34)))
+            self._line(d, mx0, my0, mx1, my1, 5.5, (*eye_color, int(glow * 0.62)))
+            self._poly(d, pts, fill=(*eye_color, eye_fill_alpha),
+                       outline=(*TEAL_HI, min(255, eye_fill_alpha + 20)), width=0.8)
+
+        if self._state == "thinking":
+            flare = int((eye_alpha - 86) / 152 * 70)
+            self._line(d, 790, 396, 910, 354, 4.0,
+                       (*TEAL_HI, 82 + flare))
+            self._line(d, 944, 364, 1058, 322, 4.0,
+                       (*TEAL_HI, 82 + flare))
+
     # ---- 音频波形 ----------------------------------------------------
     def _draw_waveform(self, d, color) -> None:
         rr, gg, bb = color
-        x0, x1 = LX, DIV_X - 18
-        midy = 428
+        x0, x1 = 114, 352
+        midy = 332
         self._line(d, x0, midy, x1, midy, 1, (*TEAL_DIM, 120))
 
-        amp = {"speaking": 30, "listening": 22, "thinking": 9}.get(self._state, 6)
-        bars = 48
+        amp = {"speaking": 18, "listening": 13, "thinking": 6}.get(self._state, 4)
+        bars = 42
         step = (x1 - x0) / bars
         ph = self._phase
         for i in range(bars):
@@ -591,6 +814,9 @@ class DesktopPet:
             peak = abs(v) > 0.7
             col = (*(TEAL_HI if peak else color), 235)
             self._line(d, x, midy - h, x, midy + h, max(1.6, step * 0.42), col)
+        self._txt(d, 260, 318, "Player", _mono(8), (*TEAL, 220))
+        self._txt(d, 190, 350, "18. Scels of Arraycraft ft. Black Cobra",
+                  _mono(7), (*TEAL, 210))
 
     # ---- 系统遥测 ----------------------------------------------------
     def _draw_stats(self, d) -> None:
@@ -598,65 +824,104 @@ class DesktopPet:
         used = (total - free) / total if total else 0
         pct, charging = self._tele.battery()
         la, cpu = self._tele.load()
-        rows = [
-            ("DISK", f"{free:.0f}G FREE / {total:.0f}G", used, False),
-            ("POWER", (f"{pct}%" + ("  CHG" if charging else ""))
-             if pct is not None else "--", (pct or 0) / 100, True),
-            ("CPU LOAD", f"{la:.2f}  {cpu * 100:.0f}%", cpu, False),
-            ("UPTIME", self._tele.uptime(), None, False),
-        ]
-        x, w, y0 = RX, RXE - RX, 146
-        for i, (label, val, frac, good_high) in enumerate(rows):
-            y = y0 + i * 30
-            self._txt(d, x, y, label, _mono(12), (120, 226, 240, 255))
-            self._txt(d, x + w, y, val, _mono(13), (218, 244, 251, 255),
-                      anchor="ra")
-            if frac is not None:
-                by = y + 17
-                self._line(d, x, by, x + w, by, 2, (*TEAL_DIM, 110))
-                fc = TEAL
-                if (good_high and frac < 0.2) or (not good_high and frac > 0.85):
-                    fc = (240, 150, 80)
-                self._line(d, x, by, x + w * max(0.02, frac), by, 2, (*fc, 255))
+        # 左上存储读数，靠近参考图的 PRIMARY STORAGE 区块。
+        self._txt(d, 108, 252, f"Full Capacity: {total:.0f} G", _mono(10),
+                  (*TEAL, 235))
+        self._txt(d, 108, 292, "PRIMARY STORAGE", _mono(9), (*TEAL_DIM, 220))
+        self._txt(d, 108, 312, f"Free Capacity: {free:.0f} G", _mono(10),
+                  (*TEAL, 235))
+        self._line(d, 108, 320, 220, 320, 2, (*TEAL_DIM, 160))
+        self._line(d, 108, 320, 108 + 112 * max(0.04, 1 - used), 320, 2,
+                   (*TEAL, 235))
+
+        # 电源圆表。
+        px, py, pr = 160, 366, 44
+        battery_text = f"{pct}%" if pct is not None else "--"
+        self._ell(d, px, py, pr, outline=(*TEAL_DIM, 210), width=max(1, int(3 * S)))
+        self._ell(d, px, py, pr - 10, outline=(*TEAL, 230), width=max(1, int(2 * S)))
+        self._arc(d, px, py, pr + 8, -90, -90 + 360 * ((pct or 0) / 100),
+                  4, (*TEAL, 235))
+        self._txt(d, px, py - 8, "Power", _mono(8), (*TEAL, 220), anchor="ma")
+        self._txt(d, px, py + 10, battery_text, _mono(16), (*TEAL_HI, 255),
+                  anchor="ma")
+        self._txt(d, px, py + 26, "High" if charging else "Level", _mono(8),
+                  (*TEAL, 220), anchor="ma")
+
+        # 底部左侧小状态。
+        self._txt(d, 110, 438, "Waste Status", _mono(9), (*TEAL, 220))
+        self._txt(d, 128, 458, "0 Files(s)", _mono(9), (*TEAL, 235))
+        self._ell(d, 202, 428, 9, fill=(*TEAL, 235))
+        self._txt(d, 100, 478, f"Uptime: {self._tele.uptime()}", _mono(9),
+                  (*TEAL, 230))
+        self._txt(d, 208, 338, "Player", _mono(8), (*TEAL, 220))
+        self._line(d, 236, 326, 350, 326, 2, (*TEAL_DIM, 170))
+        self._txt(d, 232, 352, f"CPU {cpu * 100:.0f}% · Load {la:.2f}",
+                  _mono(8), (*TEAL, 220))
+
+        # 反应堆下方主应用分支。
+        for i, label in enumerate(("Photoshop", "Word", "Excel", "Powerpoint")):
+            y = 528 + i * 22
+            self._ell(d, 486, y, 6, fill=(*TEAL, 215))
+            self._line(d, 486, y, 552, y, 2, (*TEAL, 170))
+            self._txt(d, 505, y - 9, label, _mono(9), (*TEAL, 230))
 
     # ---- 笔记 / 待办 -------------------------------------------------
     def _draw_notes(self, d) -> None:
-        font = _han(14)
-        x, w, y = RX, RXE - RX, 312
+        font = _han(10)
+        x, w, y = 924, 112, 100
         for item in self._notes.items():
-            if y > 452:
+            if y > 286:
                 break
-            self._txt(d, x, y + 2, "›", _mono(13), (120, 226, 240, 255))
-            for ln in self._wrap(d, item, font, w - 16)[:2]:
-                if y > 452:
+            self._txt(d, x, y + 2, "·", _mono(8), (120, 226, 240, 255))
+            for ln in self._wrap(d, item, font, w)[:3]:
+                if y > 286:
                     break
-                self._txt(d, x + 16, y, ln, font, (210, 240, 248, 255))
-                y += 22
-            y += 5
+                self._txt(d, x + 12, y, ln, font, (105, 235, 238, 235))
+                y += 13
+            y += 2
 
     # ---- 转写台账（底部通栏）----------------------------------------
     def _draw_transcript(self, d, color) -> None:
-        bx0, by0, bx1, by1 = 24, 470, W - 24, H - 32
-        d.rounded_rectangle([bx0 * S, by0 * S, bx1 * S, by1 * S], radius=9 * S,
-                            outline=(*TEAL_DIM, 190), width=max(1, int(1 * S)))
-        self._txt(d, bx0 + 12, by0 - 9, " TRANSCRIPT ", _mono(10),
-                  (120, 226, 240, 255))
+        bx0, by0, bx1, by1 = 94, 512, 282, 646
+        self._line(d, bx0, by0, bx1, by0, 2, (*TEAL, 210))
+        self._line(d, bx0, by0, bx0, by1, 2, (*TEAL_DIM, 190))
+        self._line(d, bx1, by0, bx1, by1 - 34, 2, (*TEAL_DIM, 170))
+        self._txt(d, bx0 + 4, by0 - 14, "Communication   compose new",
+                  _mono(9), (*TEAL, 235))
+        self._txt(d, bx0 + 16, by0 + 22, "RainMeter", _mono(8), (*TEAL, 205))
+        self._txt(d, bx0 + 16, by0 + 42, "Resources", _mono(8), (*TEAL_DIM, 220))
 
-        font = _han(14)
+        font = _han(10)
         rendered: list[tuple[str, str]] = []
         for role, text in self._lines:
-            prefix = {"you": "你 › ", "jarvis": "J › ", "sys": "» "}.get(role, "")
-            for ln in self._wrap(d, prefix + text, font, bx1 - bx0 - 24):
+            prefix = {"you": "你: ", "jarvis": "J: ", "sys": "» "}.get(role, "")
+            for ln in self._wrap(d, prefix + text, font, bx1 - bx0 - 26):
                 rendered.append((role, ln))
-        lh = 22
-        avail = int((by1 - by0 - 18) / lh)
+        lh = 15
+        avail = 5
         jc = tuple(int(c + (255 - c) * 0.35) for c in color)   # 回答色提亮
         rolecol = {"you": (205, 238, 247, 255), "jarvis": (*jc, 255),
                    "sys": (175, 215, 224, 240)}
-        ty = by0 + 12
+        ty = by0 + 66
         for role, ln in rendered[-avail:]:
-            self._txt(d, bx0 + 12, ty, ln, font, rolecol.get(role, TEAL))
+            self._txt(d, bx0 + 16, ty, ln, font, rolecol.get(role, TEAL))
             ty += lh
+
+        # 右下 Reader feed，贴近参考图 gizmodo 列表。
+        rx, ry = 950, 430
+        reader = [text for role, text in self._lines if role == "jarvis"][-4:]
+        if not reader:
+            reader = [
+                "Eye-Fi Direct Mode Beams Photos From",
+                "Your Camera to Your Mobile",
+                "It's Time to Install Some Apps On Your",
+                "Toyota [Automotive]",
+            ]
+        for item in reader[:5]:
+            for ln in self._wrap(d, item, _han(9), 174)[:2]:
+                self._txt(d, 1122, ry, ln, _han(9), (*TEAL, 210), anchor="ra")
+                ry += 16
+            ry += 6
 
     def _wrap(self, d, text, font, max_w) -> list[str]:
         limit = max_w * S

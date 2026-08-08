@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import urllib.request
+from functools import lru_cache
 
 from . import config
 
@@ -17,6 +18,29 @@ _proc: subprocess.Popen | None = None
 
 # Windows 上隐藏 PowerShell 黑窗
 _NO_WINDOW = 0x08000000 if config.IS_WINDOWS else 0
+
+
+@lru_cache(maxsize=None)
+def _resolve_macos_voice(preferred: str) -> str:
+    """Resolve an ambiguous macOS voice name to its zh_CN variant."""
+    try:
+        result = subprocess.run(
+            ["say", "-v", "?"], capture_output=True, text=True, check=False,
+        )
+    except OSError:
+        return preferred
+    if result.returncode != 0:
+        return preferred
+    for line in result.stdout.splitlines():
+        match = re.match(r"^(.*?)\s+([a-z]{2}_[A-Z]{2})\s+#", line)
+        if not match:
+            continue
+        name, locale = match.groups()
+        if locale == "zh_CN" and (
+                name == preferred or name.startswith(preferred + " (")
+        ):
+            return name
+    return preferred
 
 
 def _clean(text: str) -> str:
@@ -48,7 +72,8 @@ def _speak_say(text: str, blocking: bool) -> None:
     if config.IS_WINDOWS:
         _speak_sapi(text, blocking)
         return
-    cmd = ["say", "-v", config.TTS_VOICE, "-r", str(config.TTS_RATE), text]
+    voice = _resolve_macos_voice(config.TTS_VOICE)
+    cmd = ["say", "-v", voice, "-r", str(config.TTS_RATE), text]
     if blocking:
         subprocess.run(cmd)
     else:
