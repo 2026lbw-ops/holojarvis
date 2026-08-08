@@ -107,31 +107,154 @@ cp model.txt.example    model.txt      # 选模型，如 deepseek-chat
 </details>
 
 <details>
-<summary><b>🪟 Windows（PowerShell）</b></summary>
+<summary><b>🪟 Windows 10/11（小白详细版）</b></summary>
+
+> 支持 Windows 10/11 64 位。首次安装依赖和首次下载 Whisper 模型都需要联网。
+
+#### 1. 安装 Python 3.12
+
+1. 打开 [Python Windows 下载页面](https://www.python.org/downloads/windows/)，下载 Python 3.12 的
+   **Windows installer (64-bit)**。
+2. 运行安装程序，务必勾选 **Add python.exe to PATH**，然后点击 **Install Now**。
+3. 安装完成后打开 PowerShell，检查版本：
 
 ```powershell
-# 1) 克隆
-git clone https://github.com/wqq64842-commits/holojarvis.git
-cd holojarvis
-
-# 2) 建虚拟环境并装依赖
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-
-# 3) 配置中转站（OpenAI 兼容网关）
-copy base_url.txt.example base_url.txt   # 填你的中转站地址，如 https://xxx/v1
-copy api_key.txt.example  api_key.txt    # 填你的 API Key
-copy model.txt.example    model.txt      # 选模型，如 deepseek-chat
-
-# 4) 启动（带桌宠）
-.\run.bat
-# 或纯命令行：.\run.bat --no-pet
+py -3.12 --version
 ```
 
-> ⚠️ Windows 上首次运行会申请**麦克风**权限（设置 → 隐私与安全性 → 麦克风，允许桌面应用访问）。
-> 系统嗓音用内置 **SAPI**（建议在「时间和语言 → 语音」里装一个中文语音，如 *Microsoft Huihui*）；
-> 发微信靠 UI 自动化，需微信已登录、能被前台唤起。
+正常情况下会显示 `Python 3.12.x`。如果提示找不到 `py`，请重新安装 Python 3.12，并确认勾选了
+**Add python.exe to PATH**。
+
+#### 2. 下载 HoloJarvis
+
+不熟悉 Git 的用户：
+
+1. 点击仓库页面右上方绿色的 **Code** 按钮；
+2. 选择 **Download ZIP**；
+3. 解压到简单路径，例如 `C:\HoloJarvis`。
+
+熟悉 Git 的用户也可以执行：
+
+```powershell
+git clone https://github.com/wqq64842-commits/holojarvis.git
+cd holojarvis
+```
+
+#### 3. 在项目目录打开 PowerShell
+
+进入解压后的 HoloJarvis 文件夹，在文件夹空白处点击鼠标右键，选择
+**在终端中打开**。也可以手动进入目录：
+
+```powershell
+cd C:\HoloJarvis
+```
+
+#### 4. 创建独立环境并安装依赖
+
+下面的命令不需要激活虚拟环境，因此不会遇到 PowerShell 脚本执行策略问题：
+
+```powershell
+# 创建 Python 虚拟环境
+py -3.12 -m venv .venv
+
+# 更新 pip
+.\.venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
+
+# 安装 HoloJarvis 依赖（可能需要几分钟）
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+#### 5. 创建并填写模型配置
+
+复制示例配置：
+
+```powershell
+Copy-Item base_url.txt.example base_url.txt
+Copy-Item api_key.txt.example api_key.txt
+Copy-Item model.txt.example model.txt
+```
+
+用记事本逐个打开：
+
+```powershell
+notepad base_url.txt
+notepad api_key.txt
+notepad model.txt
+```
+
+每个文件只填写一行，不要加引号：
+
+| 文件 | 示例内容 | 说明 |
+|---|---|---|
+| `base_url.txt` | `https://你的中转站地址/v1` | OpenAI 兼容接口地址，一般以 `/v1` 结尾 |
+| `api_key.txt` | `sk-xxxxxxxx` | 你的中转站或模型服务 API Key |
+| `model.txt` | `deepseek-chat` | 中转站支持的模型名称 |
+
+> 🔒 API Key 属于私密信息。不要截图、发给别人或提交到 GitHub；这些本地配置已经加入 `.gitignore`。
+
+#### 6. 测试模型连接
+
+```powershell
+.\.venv\Scripts\python.exe test_llm.py
+```
+
+如果终端显示模型回复，说明地址、API Key 和模型名称配置正确。如果出现 `401`，通常是 API Key 错误；
+如果出现 `404`，请检查接口地址是否需要 `/v1`，以及模型名称是否正确。
+
+#### 7. 启动 HoloJarvis
+
+```powershell
+# 桌面 HUD 模式
+.\run.bat
+
+# 3D 全息浏览器模式
+.\run.bat --holo
+
+# 纯命令行模式
+.\run.bat --no-pet
+```
+
+首次启动会自动下载 Whisper 语音识别模型，可能需要几分钟。下载期间请保持网络连接，不要关闭窗口。
+
+#### 8. 开启麦克风权限
+
+打开 **Windows 设置 → 隐私和安全性 → 麦克风**，确保以下开关已经开启：
+
+- 麦克风访问权限；
+- 允许应用访问麦克风；
+- 允许桌面应用访问麦克风。
+
+系统朗读使用 Windows 内置 **SAPI**。如果能识别你的声音但没有语音回复，请检查系统扬声器是否静音，
+并前往 **设置 → 时间和语言 → 语音** 安装中文语音。
+
+#### 常见问题
+
+**依赖安装失败**
+
+先重新升级安装工具，再安装依赖：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+**Whisper 模型下载失败**
+
+- 检查网络连接后重新运行，已经下载的缓存通常可以继续使用；
+- 如果使用代理，请检查代理地址和端口是否合法；
+- 下载阶段不要关闭 PowerShell 窗口。
+
+**更新 HoloJarvis**
+
+Git 用户可以执行：
+
+```powershell
+git pull
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+使用 ZIP 的用户可以下载新版 ZIP，并把自己的 `base_url.txt`、`api_key.txt`、`model.txt`、
+`memory.json` 和 `notes.txt` 复制到新目录。发微信功能依赖已登录的微信客户端，并通过界面自动化完成操作。
 </details>
 
 启动后喊一声「**贾维斯**」，或用鼠标点一下桌宠中央的反应堆，就能开始对话。
