@@ -1,10 +1,15 @@
 import math
 import unittest
+from unittest.mock import patch
 
 from jarvis import pet
 
 
 class PetVisualHelpersTest(unittest.TestCase):
+    def test_dpi_setup_is_a_noop_off_windows(self) -> None:
+        with patch.object(pet.config, "IS_WINDOWS", False):
+            self.assertIsNone(pet._enable_windows_dpi())
+
     def test_canvas_matches_reference_image_proportion(self) -> None:
         self.assertEqual((pet.W, pet.H), (1206, 694))
 

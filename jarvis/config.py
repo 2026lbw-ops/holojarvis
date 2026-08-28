@@ -71,7 +71,7 @@ def _read_first_line(filename: str) -> str:
 _MODEL_VALUE = (os.environ.get("JARVIS_MODEL")
                 or _read_first_line("model.txt")).strip()
 MODEL = _MODEL_VALUE or "deepseek-v4-flash"
-MAX_TOKENS = max(64, int(os.environ.get("JARVIS_MAX_TOKENS", "1024")))
+MAX_TOKENS = max(64, int(os.environ.get("JARVIS_MAX_TOKENS", "384")))
 HISTORY_TURNS = max(1, int(os.environ.get("JARVIS_HISTORY_TURNS", "12")))
 
 # 中转站（OpenAI 兼容网关）地址。优先级：环境变量 JARVIS_BASE_URL > base_url.txt。
@@ -152,14 +152,14 @@ def llm_endpoint() -> str:
     return base + "/chat/completions"
 
 # Whisper 语音识别模型大小：tiny / base / small / medium / large-v3
-# small 平衡；要更准用 medium（中文识别明显更好，但更慢、首次下载更大）；机器弱可改 base
-WHISPER_MODEL = os.environ.get("JARVIS_WHISPER", "small")
+# base 平衡；要更准用 small 或 medium（中文识别更好，但更慢、首次下载更大）；机器弱可改 tiny
+WHISPER_MODEL = os.environ.get("JARVIS_WHISPER", "base")
 WHISPER_COMPUTE = "int8"          # CPU 上用 int8 最快
 ASR_LANGUAGE = "zh"
 
 # ---- 识别精度 / 速度 旋钮（越大越准越慢）------------------------------
 # beam 搜索宽度：1=贪心最快(精度一般)；3 折中；5 最准(约 +350ms)。环境变量 JARVIS_ASR_BEAM 可调。
-ASR_BEAM = int(os.environ.get("JARVIS_ASR_BEAM", "5"))
+ASR_BEAM = int(os.environ.get("JARVIS_ASR_BEAM", "3"))
 # 是否再做一遍 VAD 静音过滤：开=更少把噪音/静音听成幻觉文字，略慢。
 ASR_VAD = os.environ.get("JARVIS_ASR_VAD", "1") not in ("0", "false", "False")
 # 可选的识别提示；默认留空，避免静音时复述提示内容产生幻觉。
@@ -242,7 +242,7 @@ SAMPLE_RATE = 16000               # Whisper 要求 16k
 FRAME_MS = 30                     # 每帧时长
 AUDIO_BACKEND = os.environ.get("JARVIS_AUDIO_BACKEND", "sounddevice").strip().lower()
 MIC_MIN_THRESHOLD = max(1.0, float(os.environ.get("JARVIS_MIC_THRESHOLD", "400")))
-SILENCE_TAIL = max(0.2, float(os.environ.get("JARVIS_SILENCE_TAIL", "0.5")))
+SILENCE_TAIL = max(0.2, float(os.environ.get("JARVIS_SILENCE_TAIL", "0.35")))
                                   # 句尾静音多久判定说完；USB 音频断流可适当调高
 MIN_SPEECH = 0.3                  # 太短的声音(<0.3s)忽略，多半是噪音
 MAX_SEGMENT = 15                  # 单段录音上限（秒）

@@ -1,7 +1,10 @@
 import json
 import os
+import subprocess
+import sys
 import unittest
 from unittest.mock import patch
+from pathlib import Path
 
 from jarvis import config
 
@@ -21,6 +24,17 @@ class _Response:
 
 
 class ModelConfigTest(unittest.TestCase):
+    def test_responsive_defaults_balance_speed_and_accuracy(self) -> None:
+        env = os.environ.copy()
+        for name in ("JARVIS_MAX_TOKENS", "JARVIS_WHISPER", "JARVIS_ASR_BEAM", "JARVIS_SILENCE_TAIL"):
+            env.pop(name, None)
+        code = "from jarvis import config; import json; print(json.dumps([config.MAX_TOKENS, config.WHISPER_MODEL, config.ASR_BEAM, config.SILENCE_TAIL]))"
+        result = subprocess.run(
+            [sys.executable, "-c", code], cwd=Path(__file__).parents[1], env=env,
+            text=True, capture_output=True, check=True,
+        )
+        self.assertEqual(json.loads(result.stdout), [384, "base", 3, 0.35])
+
     def test_ollama_is_used_only_when_no_endpoint_is_configured(self) -> None:
         response = _Response({"models": [{"name": "qwen3:8b"}]})
         with patch.object(config, "LLM_BASE_URL", ""), \

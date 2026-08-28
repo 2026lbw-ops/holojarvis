@@ -63,6 +63,21 @@ import tkinter as tk  # noqa: E402
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk  # noqa: E402
 
+
+def _enable_windows_dpi() -> None:
+    """让 Tk 按显示器原生像素渲染，避免 Windows 再次放大而发糊。"""
+    if not config.IS_WINDOWS:
+        return
+    try:
+        import ctypes
+        if ctypes.windll.shcore.SetProcessDpiAwareness(2):
+            ctypes.windll.user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass
+
+
+_enable_windows_dpi()
+
 # ---- 面板尺寸（逻辑像素）+ 超采样倍率 -------------------------------
 W, H = 1206, 694
 S = 2                           # 内部 2x 渲染再缩小，边缘更顺滑
