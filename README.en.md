@@ -40,7 +40,7 @@ Its brain talks to an **OpenAI-compatible API**, so you can plug in **any model 
 - 🎙️ **Local speech recognition** — transcribed on-device with [faster-whisper](https://github.com/SYSTRAN/faster-whisper); your audio never leaves your machine.
 - 🔑 **Fuzzy pinyin wake word** — say "贾维斯" (Jarvis); homophone mis-hearings still match, with noise/hallucination filtering so the TV won't trigger it.
 - 🧠 **Any LLM** — connect DeepSeek / GPT / Claude etc. through your OpenAI-compatible gateway; change one line to swap models.
-- 🧰 **17 built-in tools + MCP** — open apps, check weather, control music, read the screen, send WeChat messages, tidy files, set timers… and extend further via [MCP](https://modelcontextprotocol.io/).
+- 🧰 **23 built-in tools + MCP** — open apps, check weather, control music, read the screen, manage memory, review file changes, tidy files, set timers… and extend further via [MCP](https://modelcontextprotocol.io/).
 - 🗣️ **Cloned voice** — optionally connect [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS) to speak in a cloned voice; falls back to the system `say` voice if the service is offline.
 - 🧬 **Long-term memory** — tell it "remember…" and it keeps your name, preferences, and habits across restarts.
 - 🪟 **Holographic HUD pet** — an Iron-Man-style cyan console: an arc reactor that changes color by state, clock & weather, disk/battery/CPU telemetry, conversation captions, and a notes panel. Click the reactor to talk.
@@ -69,7 +69,8 @@ flowchart LR
 | Recognition | `jarvis/asr.py` `jarvis/audio.py` | Microphone + faster-whisper |
 | Brain | `jarvis/brain.py` | Gateway calls, tool-calling loop, multi-step tasks |
 | Tools | `jarvis/tools.py` `jarvis/mcp_bridge.py` | Local tools + MCP tools |
-| Memory | `jarvis/memory.py` | Persisted to `memory.json` |
+| Memory | `jarvis/memory.py` | SQLite `memory.db`; imports legacy `memory.json` |
+| Tasks | `jarvis/tasks.py` | Local SQLite `tasks.db` task board |
 | Voice | `jarvis/tts.py` | GPT-SoVITS cloned voice / system voice (say · SAPI) |
 | Pet | `jarvis/pet.py` | Holographic HUD (tkinter + Pillow) |
 | Platform | `jarvis/winops.py` | Windows low-level ops (clipboard/media/screenshot/recycle/telemetry…) |
@@ -95,7 +96,7 @@ pip install -r requirements.txt
 # 3) Configure your gateway (OpenAI-compatible)
 cp base_url.txt.example base_url.txt   # your gateway URL, e.g. https://xxx/v1
 cp api_key.txt.example  api_key.txt    # your API key
-cp model.txt.example    model.txt      # pick a model, e.g. deepseek-chat
+cp model.txt.example    model.txt      # pick a model, e.g. deepseek-v4-flash
 
 # 4) Run (with the desk pet)
 ./run.sh
@@ -122,7 +123,7 @@ pip install -r requirements.txt
 # 3) Configure your gateway (OpenAI-compatible)
 copy base_url.txt.example base_url.txt   # your gateway URL, e.g. https://xxx/v1
 copy api_key.txt.example  api_key.txt    # your API key
-copy model.txt.example    model.txt      # pick a model, e.g. deepseek-chat
+copy model.txt.example    model.txt      # pick a model, e.g. deepseek-v4-flash
 
 # 4) Run (with the desk pet)
 .\run.bat
@@ -159,12 +160,17 @@ All sensitive config lives in a few text files in the project root (excluded by 
 |---|---|---|
 | `base_url.txt` | Gateway URL (ending in `/v1`) | ✅ |
 | `api_key.txt` | Gateway / LLM API key | ✅ |
-| `model.txt` | Model name (default `deepseek-chat`) | ⬜ |
+| `model.txt` | Model name (default `deepseek-v4-flash`) | ⬜ |
 | `mcp.json` | MCP tool config | ⬜ |
 | `notes.txt` | HUD notes panel content | ⬜ |
 
 Environment variables override these (higher priority): `JARVIS_BASE_URL`, `JARVIS_API_KEY`, `JARVIS_MODEL`,
-`JARVIS_TTS`, `JARVIS_VOICE`, `JARVIS_WHISPER`, etc. — see `jarvis/config.py`.
+`JARVIS_MAX_TOKENS`, `JARVIS_CLOUD_MEMORY`, `JARVIS_TTS`, `JARVIS_VOICE`, `JARVIS_WHISPER`, etc. — see `jarvis/config.py`.
+On Windows, set `JARVIS_OUTPUT_DEVICE` to an output index or name fragment (for example, `Conexant SmartAudio HD`) when the system default routes audio incorrectly.
+If a Windows USB microphone works in Sound Recorder but not in Python, set `JARVIS_AUDIO_BACKEND=soundcard`; use `JARVIS_MIC_THRESHOLD` to tune low-level voice activation (default: `400`).
+Increase `JARVIS_SILENCE_TAIL` (seconds) when brief USB capture gaps split an utterance too early.
+The `soundcard` compatibility backend uses five-second capture blocks for older USB drivers, so responses may be about five seconds slower than the default backend.
+For CPU-only local models, set `JARVIS_MAX_TOKENS=256` to reduce latency for short voice replies.
 
 > 🔧 **Switch models**: edit one line in `model.txt` and restart. Pick a model that **supports tool calling**,
 > otherwise opening apps / reading the screen / memory won't work.
@@ -180,13 +186,96 @@ Environment variables override these (higher priority): `JARVIS_BASE_URL`, `JARV
 | `take_screenshot` / `read_screen` | Screenshot, read & summarize the screen |
 | `send_wechat` | Send a WeChat message (confirms verbally first; macOS / Windows) |
 | `system_power` | Lock / sleep |
-| `remember` / `forget` | Long-term memory add/remove |
+| `remember` / `list_memories` | Add and view core, long-term, or project memories |
+| `update_memory` / `forget` / `clear_memories` | Edit, remove by keyword, or clear memories (confirmation required) |
+| `export_memories` | Export JSON inside `workspace/` (confirmation required) |
+| `read_text_file` / `propose_file_change` | Read confirmed text and create file proposals without changing targets |
 | `list_directory` / `run_shell` / `move_to_trash` | Multi-step file tasks (deletes go to Trash) |
+
+Session memory is the bounded current conversation and is cleared by `/reset`; `core`, `long_term`, and
+`project` memories persist in SQLite. Editing, exporting, and clearing are high-risk operations that must be enabled and confirmed each time.
+
+With a cloud model, the current conversation and tool results are sent to the configured endpoint; persistent
+memory is not sent by default. Set `JARVIS_CLOUD_MEMORY=core,project` to allow selected categories, or use
+`all` / `none`. Loopback endpoints (`localhost`, `127.0.0.1`, `::1`) allow every category by default. Startup
+and `python -m jarvis --check --text` show the effective scope and reject invalid values.
+
+### Local task board
+
+Text mode supports local-only task commands that are never sent to the model:
+
+```text
+/task add Finish the project notes
+/task list
+/task start 1
+/task progress 1 25 Requirements reviewed
+/task remind 1 2026-08-28 09:00 Check the attachment first
+/task reminders
+/task unremind 1
+/task done 1
+/task reopen 1
+/task list all
+```
+
+Tasks use `todo`, `doing`, and `done` states; the default list shows active tasks only. Reaching 100% completes
+a task automatically. A completed task must be reopened before its progress can be reduced.
+
+Each unfinished task can hold one local absolute-time reminder. While text mode is running, a due reminder is
+shown once within about one second and survives restarts. Completing a task cancels its reminder. Reminder data
+is never sent to the model.
+
+### File change review
+
+The agent can only propose changes to UTF-8 text files up to 256 KiB inside `workspace/`; target files remain
+untouched until acceptance. Reading an existing file is high risk and requires dangerous tools to be enabled
+plus a separate confirmation. Review locally with:
+
+```text
+/diff list
+/diff show 1
+/diff accept 1
+/diff reject 1
+```
+
+A successful acceptance creates a local undo record:
+
+```text
+/undo list
+/undo show 1
+/undo apply 1
+```
+
+Acceptance or undo refuses to overwrite a target that has changed. Binary files, partial acceptance,
+multi-file transactions, repeated undo, and redo are not supported in the first version.
 
 ## 🔌 MCP extensions
 
 Edit `mcp.json` to connect [MCP](https://modelcontextprotocol.io/) servers (filesystem, browser automation, web fetch, …);
-a filesystem example ships with the repo. MCP tools are offered to the LLM alongside the built-in tools.
+a filesystem example ships with the repo. MCP remains globally disabled by `JARVIS_ENABLE_MCP`. When enabled,
+every server must explicitly assign each exposed tool either `"allow"` or `"confirm"` in its `permissions` map.
+Unlisted tools are denied and never shown to the model. A missing, empty, or invalid permission map prevents that
+server from starting; startup logs report allowed, confirmed, and denied counts. Code-level browser payment gates
+cannot be downgraded by configuration. The filesystem example is read-only and limited to `workspace/`.
+
+Text mode exposes `/skills`, `/skills builtin`, and `/skills mcp` to show each callable Skill's source and current
+permission. These commands are handled locally and never reveal MCP environment variables or secrets. In this
+version, executable Skills are built-in and MCP tools; there is no standalone `SKILL.md` installer yet.
+
+### Pre-release validation
+
+Run `.\.venv\Scripts\python.exe scripts\release_check.py` on Windows (or the equivalent `.venv/bin/python`
+command on macOS), then complete the [manual device and release checklist](docs/RELEASE_CHECKLIST.md). Never
+release from a working tree with uncommitted changes.
+
+The browser example is disabled by default. To enable it, set `JARVIS_ENABLE_MCP=1` and change
+`_示例_隔离浏览器.enabled` to `true`. It uses an in-memory profile, fixes its working directory to
+`workspace/`, and writes downloads and other output only to `workspace/browser-output/`; it never reuses an
+existing Chrome or Edge login. The bridge rejects Playwright configurations that disable these boundaries.
+
+Uploads can only select existing files inside `workspace/`. Uploads, every page click, Enter/Space submission,
+`submit=true`, accepting a browser dialog, and browser-side script execution pause until the user replies
+“确认执行” in the next turn. Authorization is single-use; cancellation or unrelated input invalidates it, and
+the event is written to the local redacted audit log.
 
 ## 🗺️ Roadmap
 

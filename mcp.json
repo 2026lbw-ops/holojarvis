@@ -1,17 +1,60 @@
 {
   "filesystem": {
     "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-filesystem", "~/Desktop", "~/Downloads"],
+    "args": ["-y", "@modelcontextprotocol/server-filesystem@2026.7.10", "."],
+    "cwd": "{workspace}",
+    "permissions": {
+      "read_text_file": "allow",
+      "read_media_file": "allow",
+      "read_multiple_files": "allow",
+      "list_directory": "allow",
+      "list_directory_with_sizes": "allow",
+      "directory_tree": "allow",
+      "search_files": "allow",
+      "get_file_info": "allow",
+      "list_allowed_directories": "allow"
+    },
     "enabled": true
   },
-  "_示例_浏览器自动化": {
+  "_示例_隔离浏览器": {
     "command": "npx",
-    "args": ["-y", "@playwright/mcp@latest"],
+    "args": [
+      "-y", "@playwright/mcp@0.0.79",
+      "--isolated",
+      "--output-dir", "browser-output",
+      "--block-service-workers",
+      "--codegen", "none"
+    ],
+    "cwd": "{workspace}",
+    "permissions": {
+      "browser_navigate": "allow",
+      "browser_navigate_back": "allow",
+      "browser_reload": "allow",
+      "browser_snapshot": "allow",
+      "browser_find": "allow",
+      "browser_take_screenshot": "allow",
+      "browser_console_messages": "allow",
+      "browser_network_requests": "allow",
+      "browser_wait_for": "allow",
+      "browser_resize": "allow",
+      "browser_hover": "allow",
+      "browser_type": "allow",
+      "browser_fill_form": "allow",
+      "browser_select_option": "allow",
+      "browser_press_key": "allow",
+      "browser_handle_dialog": "allow",
+      "browser_drop": "confirm",
+      "browser_click": "confirm",
+      "browser_file_upload": "confirm",
+      "browser_evaluate": "confirm",
+      "browser_run_code_unsafe": "confirm"
+    },
     "enabled": false
   },
   "_示例_网页抓取(python)": {
     "command": "uvx",
     "args": ["mcp-server-fetch"],
+    "permissions": {"fetch": "allow"},
     "enabled": false
   }
 }

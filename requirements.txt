@@ -1,5 +1,6 @@
 faster-whisper>=1.0.0   # 本地语音识别（Whisper）
 sounddevice>=0.4.6      # 麦克风录音
+SoundCard>=0.4.6; sys_platform == "win32"  # Windows USB 麦克风兼容后端
 numpy>=1.26             # 音频处理
 pypinyin>=0.50          # 唤醒词拼音模糊匹配
 pillow>=10.0            # 桌宠 HUD 绘制

@@ -31,11 +31,15 @@ def load() -> None:
     即便用讯飞后端也照样加载，作为云端连不上时的兜底。"""
     global _model
     if _model is None:
-        _model = WhisperModel(
-            config.WHISPER_MODEL,
-            device="cpu",
-            compute_type=config.WHISPER_COMPUTE,
-        )
+        try:
+            _model = WhisperModel(
+                config.WHISPER_MODEL, device="cpu",
+                compute_type=config.WHISPER_COMPUTE,
+            )
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(
+                f"Whisper-{config.WHISPER_MODEL} 加载失败；首次运行请检查网络和磁盘空间"
+            ) from e
 
 
 def transcribe(audio: np.ndarray, cloud: bool = False) -> ASRResult:
@@ -64,15 +68,15 @@ def _transcribe_local(audio: np.ndarray) -> ASRResult:
     if _model is None:
         load()
     assert _model is not None
-    segments, _ = _model.transcribe(
-        audio,
-        language=config.ASR_LANGUAGE,
-        beam_size=config.ASR_BEAM,             # 精度/速度旋钮（config.ASR_BEAM）
-        vad_filter=config.ASR_VAD,             # 再过滤一遍静音，减少噪音幻听
-        initial_prompt=config.ASR_INITIAL_PROMPT,  # 简体定调 + 可塞常用词/人名
-        condition_on_previous_text=False,      # 不带上文，避免额外开销与重复漂移
-    )
-    segs = list(segments)
+    try:
+        segments, _ = _model.transcribe(
+            audio, language=config.ASR_LANGUAGE, beam_size=config.ASR_BEAM,
+            vad_filter=config.ASR_VAD, initial_prompt=config.ASR_INITIAL_PROMPT,
+            condition_on_previous_text=False,
+        )
+        segs = list(segments)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError("本地语音识别失败，请检查 Whisper 模型和音频设备") from e
     text = "".join(s.text for s in segs).strip()
     if not segs:
         return ASRResult("", 1.0, -10.0)

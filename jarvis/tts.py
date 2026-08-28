@@ -9,6 +9,8 @@ import json
 import os
 import re
 import subprocess
+import sys
+import threading
 import urllib.request
 from functools import lru_cache
 
@@ -52,18 +54,93 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
-def _play_file(path: str, blocking: bool) -> None:
+def _pick_output_device(devices, requested: str) -> int:
+    """把设备编号或名称片段解析为 sounddevice 输出编号。"""
+    if requested.isdecimal():
+        return int(requested)
+    needle = requested.casefold()
+    for index, device in enumerate(devices):
+        if (device["max_output_channels"] > 0
+                and needle in device["name"].casefold()):
+            return index
+    raise RuntimeError(f"找不到音频输出设备：{requested}")
+
+
+def _play_sounddevice_file(path: str, requested: str) -> None:
+    """用指定 Windows 音频设备播放 PCM WAV。"""
+    import wave
+    import numpy as np
+    import sounddevice as sd
+
+    with wave.open(path, "rb") as wav:
+        if wav.getsampwidth() != 2:
+            raise RuntimeError("仅支持 16-bit PCM WAV 播放")
+        channels = wav.getnchannels()
+        rate = wav.getframerate()
+        data = np.frombuffer(wav.readframes(wav.getnframes()), dtype=np.int16)
+    device = _pick_output_device(sd.query_devices(), requested)
+    sd.play(data.reshape(-1, channels), rate, device=device)
+    sd.wait()
+
+
+def _play_file(path: str, blocking: bool) -> subprocess.Popen | None:
     global _proc
-    if config.IS_WINDOWS:
+    env = None
+    if config.IS_WINDOWS and config.OUTPUT_DEVICE:
+        cmd = [sys.executable, "-c",
+               "import os; from jarvis.tts import _play_sounddevice_file; "
+               "_play_sounddevice_file(os.environ['JV_AUDIO'], "
+               "os.environ['JV_OUTPUT_DEVICE'])"]
+        env = {**os.environ, "JV_AUDIO": path,
+               "JV_OUTPUT_DEVICE": config.OUTPUT_DEVICE}
+    elif config.IS_WINDOWS:
         # 用 PowerShell 的 SoundPlayer 播放 wav；放进独立进程，stop() 可终止它
         cmd = ["powershell", "-NoProfile", "-Command",
                f"(New-Object System.Media.SoundPlayer '{path}').PlaySync()"]
     else:
         cmd = ["afplay", path]
     if blocking:
-        subprocess.run(cmd, creationflags=_NO_WINDOW)
+        subprocess.run(cmd, env=env, creationflags=_NO_WINDOW)
+        return None
     else:
-        _proc = subprocess.Popen(cmd, creationflags=_NO_WINDOW)
+        _proc = subprocess.Popen(cmd, env=env, creationflags=_NO_WINDOW)
+        return _proc
+
+
+def _remove_files(*paths: str) -> None:
+    for path in paths:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _remove_when_done(proc: subprocess.Popen, *paths: str) -> None:
+    def cleanup() -> None:
+        try:
+            proc.wait()
+        finally:
+            _remove_files(*paths)
+
+    threading.Thread(target=cleanup, daemon=True).start()
+
+
+def _play_temp_file(path: str, blocking: bool) -> None:
+    if blocking:
+        try:
+            _play_file(path, True)
+        finally:
+            _remove_files(path)
+        return
+    try:
+        proc = _play_file(path, False)
+    except Exception:
+        _remove_files(path)
+        raise
+    if proc is None:
+        _remove_files(path)
+    else:
+        _remove_when_done(proc, path)
 
 
 def _speak_say(text: str, blocking: bool) -> None:
@@ -90,6 +167,13 @@ def _speak_sapi(text: str, blocking: bool) -> None:
     tf.write(text)
     tf.close()
     rate = max(-10, min(10, round((config.TTS_RATE - 200) / 20)))  # 字/分→SAPI档(-10~10)
+    wav_path = ""
+    output_setup = ""
+    if config.OUTPUT_DEVICE:
+        wav_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        wav_path = wav_file.name
+        wav_file.close()
+        output_setup = "$s.SetOutputToWaveFile($env:JV_WAV);"
     script = (
         "Add-Type -AssemblyName System.Speech;"
         "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
@@ -100,15 +184,33 @@ def _speak_sapi(text: str, blocking: bool) -> None:
         "if($iv.VoiceInfo.Culture.Name -like 'zh*'){"
         "$s.SelectVoice($iv.VoiceInfo.Name);break}}};"
         "$t=Get-Content -Raw -Encoding UTF8 $env:JV_TXT;"
-        "$s.Speak($t)"
+        + output_setup + "$s.Speak($t);$s.Dispose()"
     )
     cmd = ["powershell", "-NoProfile", "-NonInteractive", "-Command", script]
-    env = {**os.environ, "JV_TXT": tf.name,
+    env = {**os.environ, "JV_TXT": tf.name, "JV_WAV": wav_path,
            "JV_VOICE": os.environ.get("JARVIS_VOICE", "")}
+    if config.OUTPUT_DEVICE:
+        try:
+            subprocess.run(cmd, env=env, creationflags=_NO_WINDOW)
+        except Exception:
+            _remove_files(wav_path)
+            raise
+        finally:
+            _remove_files(tf.name)
+        _play_temp_file(wav_path, blocking)
+        return
     if blocking:
-        subprocess.run(cmd, env=env, creationflags=_NO_WINDOW)
+        try:
+            subprocess.run(cmd, env=env, creationflags=_NO_WINDOW)
+        finally:
+            _remove_files(tf.name)
     else:
-        _proc = subprocess.Popen(cmd, env=env, creationflags=_NO_WINDOW)
+        try:
+            _proc = subprocess.Popen(cmd, env=env, creationflags=_NO_WINDOW)
+        except Exception:
+            _remove_files(tf.name)
+            raise
+        _remove_when_done(_proc, tf.name)
 
 
 def _speak_clone(text: str, blocking: bool) -> bool:
@@ -152,7 +254,7 @@ def _speak_gptsovits(text: str, blocking: bool) -> bool:
         path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
         with open(path, "wb") as f:
             f.write(data)
-        _play_file(path, blocking)
+        _play_temp_file(path, blocking)
         return True
     except Exception:  # noqa: BLE001
         return False

@@ -12,17 +12,20 @@
 
 from __future__ import annotations
 
+import argparse
 import difflib
 import queue
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import urllib.parse
 
 from pypinyin import lazy_pinyin
 
-from . import asr, config, tts
+from . import asr, config, diffs, mcp_bridge, tasks, tts
 from .audio import Microphone
 from .brain import Brain
 
@@ -37,6 +40,7 @@ def _phon(text: str) -> str:
     py = re.sub(r"[^a-z]", "", py.lower())
     py = py.replace("zh", "z").replace("ch", "c").replace("sh", "s")
     py = py.replace("ang", "an").replace("eng", "en").replace("ing", "in")
+    py = py.replace("iao", "ia")
     return py
 
 
@@ -99,23 +103,120 @@ class CliUI:
     def poll_talk(self) -> bool: return False
 
 
-# ---- 语音助手主循环（在后台线程运行）-------------------------------
-
-def run_assistant(ui, stop: threading.Event) -> None:
-    api_key = config.load_api_key()          # main() 已校验过，这里必有
-    ui.log("⏳ 正在加载语音识别模型（首次会下载，请稍候）…")
-    asr.load()
-
-    # 接入 MCP 工具（可选，配置在 mcp.json；起不来不影响主程序）
+def _build_brain(ui) -> Brain:
+    """创建 Brain，并按安全开关接入 MCP。"""
     from .mcp_bridge import McpBridge, load_config
+
     mcp = None
-    mcp_cfg = load_config()
+    mcp_cfg = load_config() if config.ENABLE_MCP else {}
     if mcp_cfg:
         ui.log("⏳ 正在接入 MCP 工具（首次会下载服务器，请稍候）…")
         mcp = McpBridge()
         mcp.start(mcp_cfg, log=ui.log)
+    return Brain(config.load_api_key() or "", mcp=mcp)
 
-    brain = Brain(api_key, mcp=mcp)
+
+def startup_checks(require_audio: bool = True) -> list[tuple[bool, str]]:
+    """返回启动前检查结果，不下载模型、不调用云服务。"""
+    _, invalid_memory = config.cloud_memory_policy()
+    checks = [
+        (sys.version_info[:2] == (3, 12),
+         f"Python {sys.version_info.major}.{sys.version_info.minor}（需要 3.12）"),
+        (urllib.parse.urlparse(config.LLM_BASE_URL).scheme in {"http", "https"},
+         "模型接口地址"),
+        (bool(config.load_api_key()) or config.is_local_model(),
+         "模型 API Key（本地 Ollama 不需要）"),
+        (not invalid_memory, "模型上下文：" + config.context_disclosure()),
+    ]
+    try:
+        config.WORKSPACE.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=config.WORKSPACE):
+            pass
+        checks.append((True, f"工作区可写：{config.WORKSPACE}"))
+    except OSError as e:
+        checks.append((False, f"工作区不可写：{e}"))
+    if require_audio:
+        try:
+            import sounddevice as sd
+            device = sd.query_devices(kind="input")
+            checks.append((bool(device), "麦克风输入设备"))
+        except Exception as e:  # noqa: BLE001
+            checks.append((False, f"麦克风不可用：{e}"))
+    return checks
+
+
+def _print_checks(checks: list[tuple[bool, str]]) -> bool:
+    for ok, message in checks:
+        print(f"{'✓' if ok else '✗'} {message}", file=sys.stderr)
+    return all(ok for ok, _ in checks)
+
+
+def run_text(ui, input_fn=input) -> int:
+    """纯文字交互，不加载麦克风、Whisper 或 TTS。"""
+    brain = _build_brain(ui)
+    ui.log("✓ 文字模式就绪；输入 /skills、/task help、/diff help 或 /undo help 查看本地能力，/reset 清空对话，/exit 退出。")
+    reminder_stop = threading.Event()
+
+    def watch_reminders() -> None:
+        while not reminder_stop.wait(1):
+            try:
+                due = tasks.pop_due_reminders()
+            except Exception as e:  # noqa: BLE001
+                ui.log(f"提醒检查失败：{e}")
+                return
+            if due:
+                ui.log(due)
+
+    reminder_thread = threading.Thread(target=watch_reminders, daemon=True)
+    reminder_thread.start()
+    try:
+        while True:
+            try:
+                text = input_fn("你：").strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+            if not text:
+                continue
+            if text == "/exit":
+                break
+            if text == "/reset":
+                brain.reset()
+                ui.log("✓ 对话已清空")
+                continue
+            skills_output = mcp_bridge.handle_permissions_command(text)
+            if skills_output is not None:
+                ui.log(skills_output)
+                continue
+            task_output = tasks.handle_command(text)
+            if task_output is not None:
+                ui.log(task_output)
+                continue
+            diff_output = diffs.handle_command(text)
+            if diff_output is not None:
+                ui.log(diff_output)
+                continue
+            undo_output = diffs.handle_undo_command(text)
+            if undo_output is not None:
+                ui.log(undo_output)
+                continue
+            try:
+                for sentence in brain.ask_stream(text):
+                    ui.reply(sentence)
+            except Exception as e:  # noqa: BLE001
+                ui.log(f"大脑出错：{e}")
+    finally:
+        reminder_stop.set()
+        reminder_thread.join(timeout=12)
+    return 0
+
+
+# ---- 语音助手主循环（在后台线程运行）-------------------------------
+
+def run_assistant(ui, stop: threading.Event) -> None:
+    ui.log("⏳ 正在加载语音识别模型（首次会下载，请稍候）…")
+    asr.load()
+
+    brain = _build_brain(ui)
 
     ui.log("⏳ 正在校准麦克风环境噪音，请保持安静…")
     with Microphone() as mic:
@@ -218,20 +319,36 @@ def run_assistant(ui, stop: threading.Event) -> None:
             awake_until = time.time() + config.ACTIVE_TIMEOUT
 
 
-def main() -> int:
-    use_holo = "--holo" in sys.argv[1:]
-    use_pet = "--no-pet" not in sys.argv[1:] and not use_holo
+def _run_assistant_safe(ui, stop: threading.Event) -> None:
+    try:
+        run_assistant(ui, stop)
+    except Exception as e:  # noqa: BLE001
+        ui.set_state("error")
+        ui.log(f"✗ 语音助手停止：{e}")
 
-    if not config.LLM_BASE_URL:
-        print("✗ 没填中转站地址。", file=sys.stderr)
-        print("  请在项目目录 base_url.txt 写入你的中转站地址（如 https://你的站/v1）。",
-              file=sys.stderr)
-        return 1
-    if not config.load_api_key():
-        print("✗ 没找到 API Key。", file=sys.stderr)
-        print("  请在项目目录 api_key.txt 写入你中转站的 key（或设环境变量 JARVIS_API_KEY）。",
-              file=sys.stderr)
-        return 1
+
+def main() -> int:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    parser = argparse.ArgumentParser(description="HoloJarvis 本地语音智能体")
+    parser.add_argument("--holo", action="store_true", help="启动浏览器全息界面")
+    parser.add_argument("--text", action="store_true", help="启动纯文字交互")
+    parser.add_argument("--check", action="store_true", help="只做启动自检")
+    parser.add_argument("--no-pet", action="store_true", help="启动纯命令行语音模式")
+    args = parser.parse_args()
+    use_holo = args.holo
+    use_text = args.text
+    check_only = args.check
+    use_pet = not args.no_pet and not use_holo and not use_text
+
+    found_ollama = config.auto_configure_ollama()
+    if found_ollama:
+        print(f"✓ 已发现本机 Ollama：{config.MODEL}", file=sys.stderr)
+    checks = startup_checks(require_audio=not use_text)
+    ready = _print_checks(checks)
+    if check_only or not ready:
+        return 0 if ready else 1
     print(f"🧠 大脑：{config.MODEL}  @ {config.LLM_BASE_URL}", file=sys.stderr)
     _asr = ("讯飞云端·语音听写" if config.ASR_BACKEND == "xfyun"
             else f"本地 whisper-{config.WHISPER_MODEL}")
@@ -245,10 +362,13 @@ def main() -> int:
             use_pet = False
 
     stop = threading.Event()
+    if use_text:
+        return run_text(CliUI())
     if use_holo:
         from .holo.bridge import HoloUI
         holo = HoloUI()
-        worker = threading.Thread(target=run_assistant, args=(holo, stop), daemon=True)
+        worker = threading.Thread(target=_run_assistant_safe,
+                                  args=(holo, stop), daemon=True)
         worker.start()
         try:
             holo.run()                             # 主线程跑本地服务,Ctrl+C 退出
@@ -256,14 +376,15 @@ def main() -> int:
             stop.set()
     elif use_pet:
         pet = DesktopPet()
-        worker = threading.Thread(target=run_assistant, args=(pet, stop), daemon=True)
+        worker = threading.Thread(target=_run_assistant_safe,
+                                  args=(pet, stop), daemon=True)
         worker.start()
         try:
             pet.run()                              # 主线程跑 GUI，关闭窗口即退出
         finally:
             stop.set()
     else:
-        run_assistant(CliUI(), stop)
+        _run_assistant_safe(CliUI(), stop)
     return 0
 
 

@@ -12,14 +12,17 @@ from __future__ import annotations
 
 import base64
 import datetime
+import hashlib
+import json
 import os
 import subprocess
 import threading
 import time
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
-from . import config, memory, tts
+from . import config, diffs, memory, tts
 
 if config.IS_WINDOWS:
     from . import winops
@@ -216,9 +219,46 @@ def send_wechat(contact: str, message: str) -> str:
         _set_clipboard(saved)
 
 
-def remember(fact: str) -> str:
-    """把关于用户的一条事实/偏好写入长期记忆。"""
-    return memory.add(fact)
+def remember(fact: str, category: str = "long_term") -> str:
+    """写入核心、长期或项目记忆。"""
+    return memory.add(fact, category)
+
+
+def list_memories(category: str | None = None) -> str:
+    """查看记忆，可按分类筛选。"""
+    allowed, invalid = config.cloud_memory_policy()
+    if invalid:
+        return config.context_disclosure()
+    if category and category not in allowed:
+        return f"记忆分类 {category} 未授权发送给当前云模型"
+    items = memory.load(category)
+    if category is None:
+        items = [item for item in items if item["category"] in allowed]
+    if not items:
+        return "没有找到记忆"
+    return "\n".join(
+        f"#{item['id']} [{item['category']}] {item['fact']}" for item in items
+    )
+
+
+def update_memory(memory_id: int, fact: str,
+                  category: str | None = None) -> str:
+    """按编号修改记忆。"""
+    return memory.update(memory_id, fact, category)
+
+
+def export_memories(path: str = "memory-export.json",
+                    category: str | None = None) -> str:
+    """把记忆导出为工作区内的 JSON 文件。"""
+    target = _workspace_path(path)
+    if target is None:
+        return f"拒绝导出：只允许写入工作区 {config.WORKSPACE}"
+    return memory.export_json(Path(target), category)
+
+
+def clear_memories(category: str | None = None) -> str:
+    """清空全部或指定分类的记忆。"""
+    return memory.clear(category)
 
 
 def forget(keyword: str) -> str:
@@ -228,9 +268,20 @@ def forget(keyword: str) -> str:
 
 # --- 多步任务：文件 / 命令行 ------------------------------------------
 
+def read_text_file(path: str) -> str:
+    """读取工作区内的小型 UTF-8 文本；内容会返回给模型。"""
+    return diffs.read_text(path)
+
+
+def propose_file_change(path: str, content: str) -> str:
+    """创建待审文件提案，不修改目标文件。"""
+    return diffs.propose(path, content)
+
 def list_directory(path: str = "~") -> str:
     """列出目录内容（给多步文件任务用）。"""
-    p = os.path.expanduser(path)
+    p = _workspace_path(path)
+    if p is None:
+        return f"拒绝访问：只允许工作区 {config.WORKSPACE}"
     if not os.path.isdir(p):
         return f"目录不存在：{path}"
     entries = []
@@ -246,6 +297,8 @@ def run_shell(command: str) -> str:
     macOS 走 shell(zsh)，Windows 走 PowerShell。
     危险/批量/删除类操作应先经用户确认；删除请用 move_to_trash 而非 rm/del。
     """
+    if not config.ENABLE_SHELL:
+        return "run_shell 默认关闭；确认风险后设置 JARVIS_ENABLE_SHELL=1 才能启用"
     try:
         if config.IS_WINDOWS:
             r = subprocess.run(
@@ -269,7 +322,9 @@ def run_shell(command: str) -> str:
 
 def move_to_trash(path: str) -> str:
     """把文件/文件夹移到废纸篓/回收站（比 rm/del 安全，可恢复）。"""
-    p = os.path.expanduser(path)
+    p = _workspace_path(path)
+    if p is None:
+        return f"拒绝访问：只允许工作区 {config.WORKSPACE}"
     if not os.path.exists(p):
         return f"路径不存在：{path}"
     if config.IS_WINDOWS:
@@ -396,11 +451,58 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "remember",
-        "description": "把关于用户的事实或偏好写入长期记忆，跨重启永久记住。当用户透露自己的名字、喜好、习惯、常用设置、重要信息时主动调用。",
+        "description": "写入跨重启记忆。core 用于身份、硬性偏好和长期规则；project 用于特定项目；其他一般信息用 long_term。",
         "input_schema": {
             "type": "object",
-            "properties": {"fact": {"type": "string", "description": "要记住的一句话事实，如『用户叫小明』『用户喜欢安静』"}},
+            "properties": {
+                "fact": {"type": "string", "description": "要记住的一句话事实"},
+                "category": {"type": "string", "enum": ["core", "long_term", "project"]},
+            },
             "required": ["fact"],
+        },
+    },
+    {
+        "name": "list_memories",
+        "description": "查看已保存的记忆及编号，可按 core、long_term 或 project 分类筛选。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "enum": ["core", "long_term", "project"]},
+            },
+        },
+    },
+    {
+        "name": "update_memory",
+        "description": "按编号修改一条记忆的内容或分类。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "memory_id": {"type": "integer"},
+                "fact": {"type": "string"},
+                "category": {"type": "string", "enum": ["core", "long_term", "project"]},
+            },
+            "required": ["memory_id", "fact"],
+        },
+    },
+    {
+        "name": "export_memories",
+        "description": "把全部或指定分类的记忆导出为工作区内的 JSON 文件。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "工作区内的相对路径"},
+                "category": {"type": "string", "enum": ["core", "long_term", "project"]},
+            },
+        },
+    },
+    {
+        "name": "clear_memories",
+        "description": "清空全部或指定分类的记忆。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "enum": ["core", "long_term", "project"]},
+            },
         },
     },
     {
@@ -410,6 +512,27 @@ TOOL_SCHEMAS = [
             "type": "object",
             "properties": {"keyword": {"type": "string"}},
             "required": ["keyword"],
+        },
+    },
+    {
+        "name": "read_text_file",
+        "description": "读取 workspace 内不超过 256 KiB 的 UTF-8 文本。文件内容会发送给当前模型，必须先获得用户确认。",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "propose_file_change",
+        "description": "为 workspace 内的 UTF-8 文本创建待审修改或新文件提案；不会直接改变目标文件。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string", "description": "完整的新文件内容"},
+            },
+            "required": ["path", "content"],
         },
     },
     {
@@ -455,19 +578,89 @@ DISPATCH = {
     "send_wechat": send_wechat,
     "system_power": system_power,
     "remember": remember,
+    "list_memories": list_memories,
+    "update_memory": update_memory,
+    "export_memories": export_memories,
+    "clear_memories": clear_memories,
     "forget": forget,
+    "read_text_file": read_text_file,
+    "propose_file_change": propose_file_change,
     "list_directory": list_directory,
     "run_shell": run_shell,
     "move_to_trash": move_to_trash,
 }
 
+TOOL_RISKS = {
+    "send_wechat": "high",
+    "system_power": "high",
+    "forget": "high",
+    "update_memory": "high",
+    "export_memories": "high",
+    "clear_memories": "high",
+    "read_text_file": "high",
+    "run_shell": "high",
+    "move_to_trash": "high",
+}
 
-def run(name: str, args: dict) -> str:
+_AUDIT_LOCK = threading.Lock()
+
+
+def audit(name: str, args: dict, status: str, risk: str | None = None) -> None:
+    """记录操作结果，不保存命令、消息正文或其他参数值。"""
+    raw = json.dumps(args, ensure_ascii=False, sort_keys=True, default=str)
+    event = {
+        "at": datetime.datetime.now(datetime.UTC).isoformat(),
+        "tool": name,
+        "risk": risk or TOOL_RISKS.get(name, "low"),
+        "status": status,
+        "arg_keys": sorted(args),
+        "args_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+    }
+    try:
+        config.AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with _AUDIT_LOCK, config.AUDIT_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def requires_confirmation(name: str) -> bool:
+    return (TOOL_RISKS.get(name) == "high"
+            and config.ENABLE_DANGEROUS_TOOLS)
+
+
+def _workspace_path(path: str) -> str | None:
+    """把相对路径限定到工作区；越界返回 None。"""
+    candidate = config.workspace_path(path)
+    return str(candidate) if candidate else None
+
+
+def tool_schemas() -> list[dict]:
+    """默认不把高风险工具交给模型。"""
+    memory_allowed, _ = config.cloud_memory_policy()
+    return [schema for schema in TOOL_SCHEMAS
+            if (config.ENABLE_DANGEROUS_TOOLS
+                or TOOL_RISKS.get(schema["name"], "low") != "high")
+            and (schema["name"] != "list_memories" or memory_allowed)]
+
+
+def run(name: str, args: dict, *, confirmed: bool = False) -> str:
     """执行某个工具，返回结果文本。"""
+    if TOOL_RISKS.get(name) == "high" and not config.ENABLE_DANGEROUS_TOOLS:
+        audit(name, args, "blocked")
+        return f"工具 {name} 默认关闭；需要用户显式启用危险工具"
+    if requires_confirmation(name) and not confirmed:
+        audit(name, args, "confirmation_required")
+        return (f"高风险操作 {name} 尚未执行。请向用户说明操作内容，"
+                "并等待用户在下一轮明确回复“确认执行”或“取消”。")
     fn = DISPATCH.get(name)
     if not fn:
+        audit(name, args, "unknown")
         return f"未知工具：{name}"
     try:
-        return fn(**args)
+        result = fn(**args)
+        audit(name, args, "executed")
+        return result
     except Exception as e:  # noqa: BLE001
+        audit(name, args, "error")
         return f"执行 {name} 出错：{e}"

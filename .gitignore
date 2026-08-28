@@ -11,6 +11,17 @@ xfyun.txt
 notes.txt
 # 贾维斯记住的关于你的事
 memory.json
+memory.db
+memory.db-shm
+memory.db-wal
+tasks.db
+tasks.db-shm
+tasks.db-wal
+diffs.db
+diffs.db-shm
+diffs.db-wal
+workspace/
+audit.jsonl
 .jarvis_key
 
 # ===== 个人克隆音 / 大音频文件 / 宣传视频 =====
