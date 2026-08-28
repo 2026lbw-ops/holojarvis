@@ -85,7 +85,7 @@ flowchart LR
 
 ```bash
 # 1) 克隆
-git clone https://github.com/wqq64842-commits/holojarvis.git
+git clone https://github.com/2026lbw-ops/holojarvis.git
 cd holojarvis
 
 # 2) 建虚拟环境并装依赖
@@ -137,7 +137,7 @@ py -3.12 --version
 熟悉 Git 的用户也可以执行：
 
 ```powershell
-git clone https://github.com/wqq64842-commits/holojarvis.git
+git clone https://github.com/2026lbw-ops/holojarvis.git
 cd holojarvis
 ```
 

@@ -85,7 +85,7 @@ flowchart LR
 
 ```bash
 # 1) Clone
-git clone https://github.com/wqq64842-commits/holojarvis.git
+git clone https://github.com/2026lbw-ops/holojarvis.git
 cd holojarvis
 
 # 2) Create a venv and install deps
@@ -112,7 +112,7 @@ cp model.txt.example    model.txt      # pick a model, e.g. deepseek-v4-flash
 
 ```powershell
 # 1) Clone
-git clone https://github.com/wqq64842-commits/holojarvis.git
+git clone https://github.com/2026lbw-ops/holojarvis.git
 cd holojarvis
 
 # 2) Create a venv and install deps

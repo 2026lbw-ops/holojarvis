@@ -17,7 +17,7 @@ git ls-files | grep -Ei "api_key|base_url|^model\.txt$|^notes\.txt$|memory\.json
 ## 🛠️ 开发环境
 
 ```bash
-git clone https://github.com/wqq64842-commits/holojarvis.git
+git clone https://github.com/2026lbw-ops/holojarvis.git
 cd holojarvis
 python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt

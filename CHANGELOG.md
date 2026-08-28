@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1 - 2026-08-28
+
+### Fixed
+
+- 将 README 和贡献指南中的克隆地址更新为 `2026lbw-ops/holojarvis`。
+
 ## 1.1.0 - 2026-08-28
 
 ### Added
